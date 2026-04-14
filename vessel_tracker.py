@@ -1,6 +1,6 @@
 """
 DKM Vessel Tracker
-Volg specifieke schepen op via VesselFinder (ETA, bestemming, status)
+Zoek schepen op naam via VesselFinder — volg ETA, bestemming en status op
 """
 
 import streamlit as st
@@ -11,420 +11,400 @@ from datetime import datetime
 import time
 import re
 
-# ── Paginaconfiguratie ──────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="DKM Vessel Tracker",
-    page_icon="🚢",
-    layout="wide",
-)
+st.set_page_config(page_title="DKM Vessel Tracker", page_icon="🚢", layout="wide")
 
-# ── Stijl ───────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600&display=swap');
-
-    html, body, [class*="css"] {
-        font-family: 'IBM Plex Sans', sans-serif;
-    }
-    .main { background-color: #0f1117; }
+    html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 
     .header-bar {
         background: linear-gradient(135deg, #D94F2B 0%, #b03a1e 100%);
-        padding: 1.2rem 2rem;
-        border-radius: 8px;
-        margin-bottom: 1.5rem;
-        display: flex;
-        align-items: center;
-        gap: 1rem;
+        padding: 1.1rem 2rem; border-radius: 8px; margin-bottom: 1.5rem;
     }
-    .header-bar h1 {
-        color: white;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 1.6rem;
-        margin: 0;
-        letter-spacing: -0.5px;
+    .header-bar h1 { color:white; font-family:'IBM Plex Mono',monospace; font-size:1.5rem; margin:0; }
+    .header-bar span { color:rgba(255,255,255,0.7); font-size:0.82rem; }
+
+    .search-result {
+        background:#1a1d27; border:1px solid #2a2d3a; border-left:3px solid #3b82f6;
+        border-radius:6px; padding:0.7rem 1rem; margin-bottom:0.4rem;
     }
-    .header-bar span {
-        color: rgba(255,255,255,0.7);
-        font-size: 0.85rem;
-    }
+    .search-result .sname { font-family:'IBM Plex Mono',monospace; font-weight:600; color:#e8eaf0; font-size:0.9rem; }
+    .search-result .smeta { font-size:0.75rem; color:#6b7280; margin-top:0.15rem; font-family:'IBM Plex Mono',monospace; }
 
     .vessel-card {
-        background: #1a1d27;
-        border: 1px solid #2a2d3a;
-        border-left: 4px solid #D94F2B;
-        border-radius: 8px;
-        padding: 1.2rem 1.5rem;
-        margin-bottom: 0.8rem;
-        transition: border-color 0.2s;
+        background:#1a1d27; border:1px solid #2a2d3a; border-left:4px solid #D94F2B;
+        border-radius:8px; padding:1.1rem 1.4rem; margin-bottom:0.7rem;
     }
-    .vessel-card:hover { border-left-color: #ff6b47; }
-    .vessel-card.error { border-left-color: #555; opacity: 0.6; }
+    .vessel-card.towards { border-left-color:#10b981; }
+    .vessel-card.other   { border-left-color:#f59e0b; }
+    .vessel-card.error   { border-left-color:#374151; opacity:0.6; }
 
-    .vessel-name {
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 1.1rem;
-        font-weight: 600;
-        color: #e8eaf0;
-        margin-bottom: 0.4rem;
-    }
-    .vessel-meta {
-        font-size: 0.8rem;
-        color: #6b7280;
-        font-family: 'IBM Plex Mono', monospace;
-        margin-bottom: 0.8rem;
-    }
-    .eta-badge {
-        display: inline-block;
-        background: rgba(217, 79, 43, 0.15);
-        border: 1px solid rgba(217, 79, 43, 0.4);
-        color: #ff7a5c;
-        padding: 0.3rem 0.8rem;
-        border-radius: 4px;
-        font-family: 'IBM Plex Mono', monospace;
-        font-size: 0.85rem;
-        font-weight: 600;
-        margin-right: 0.6rem;
-    }
-    .dest-badge {
-        display: inline-block;
-        background: rgba(59, 130, 246, 0.1);
-        border: 1px solid rgba(59, 130, 246, 0.3);
-        color: #60a5fa;
-        padding: 0.3rem 0.8rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-        margin-right: 0.6rem;
-    }
-    .status-badge {
-        display: inline-block;
-        background: rgba(16, 185, 129, 0.1);
-        border: 1px solid rgba(16, 185, 129, 0.3);
-        color: #34d399;
-        padding: 0.3rem 0.8rem;
-        border-radius: 4px;
-        font-size: 0.8rem;
-    }
-    .status-badge.anchored {
-        background: rgba(245, 158, 11, 0.1);
-        border-color: rgba(245, 158, 11, 0.3);
-        color: #fbbf24;
-    }
-    .lastport {
-        font-size: 0.78rem;
-        color: #6b7280;
-        margin-top: 0.5rem;
-    }
-    .vf-link {
-        font-size: 0.75rem;
-        color: #4b5563;
-        text-decoration: none;
-        float: right;
-        margin-top: -0.2rem;
-    }
-    .vf-link:hover { color: #D94F2B; }
+    .vessel-name { font-family:'IBM Plex Mono',monospace; font-size:1rem; font-weight:600; color:#e8eaf0; margin-bottom:0.3rem; }
+    .vessel-meta { font-size:0.76rem; color:#6b7280; font-family:'IBM Plex Mono',monospace; margin-bottom:0.6rem; }
 
-    .refresh-info {
-        font-size: 0.75rem;
-        color: #4b5563;
-        font-family: 'IBM Plex Mono', monospace;
-        margin-bottom: 1rem;
-    }
-    .error-msg {
-        color: #ef4444;
-        font-size: 0.8rem;
-        font-family: 'IBM Plex Mono', monospace;
-    }
+    .badge { display:inline-block; padding:0.25rem 0.7rem; border-radius:4px; font-size:0.8rem; margin-right:0.4rem; font-family:'IBM Plex Mono',monospace; font-weight:600; }
+    .badge-eta  { background:rgba(217,79,43,0.15); border:1px solid rgba(217,79,43,0.4); color:#ff7a5c; }
+    .badge-dest { background:rgba(139,92,246,0.1); border:1px solid rgba(139,92,246,0.3); color:#a78bfa; font-weight:400; }
+    .badge-stat { background:rgba(16,185,129,0.08); border:1px solid rgba(16,185,129,0.25); color:#6ee7b7; font-weight:400; }
+    .badge-be   { background:rgba(16,185,129,0.15); border:1px solid rgba(16,185,129,0.4); color:#34d399; }
 
-    /* Streamlit overrides */
-    .stTextArea textarea {
-        font-family: 'IBM Plex Mono', monospace !important;
-        font-size: 0.85rem !important;
-        background-color: #1a1d27 !important;
-        border-color: #2a2d3a !important;
-        color: #e8eaf0 !important;
-    }
-    div[data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
+    .detail-line { font-size:0.76rem; color:#6b7280; margin-top:0.4rem; }
+    .vf-link { font-size:0.72rem; color:#4b5563; text-decoration:none; float:right; }
+    .vf-link:hover { color:#D94F2B; }
+    .refresh-info { font-size:0.74rem; color:#4b5563; font-family:'IBM Plex Mono',monospace; margin-bottom:0.8rem; }
+    .tracked-label { font-size:0.7rem; color:#6b7280; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.4rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# ── Header ──────────────────────────────────────────────────────────────────
 st.markdown("""
 <div class="header-bar">
-    <div>
-        <h1>🚢 DKM Vessel Tracker</h1>
-        <span>Real-time ETA opvolging via VesselFinder AIS data</span>
-    </div>
+    <h1>🚢 DKM Vessel Tracker</h1>
+    <span>Real-time ETA opvolging via VesselFinder AIS data</span>
 </div>
 """, unsafe_allow_html=True)
 
-# ── Scraper functie ─────────────────────────────────────────────────────────
+# ── Constanten ────────────────────────────────────────────────────────────────
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
                   "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+ANTP_KW = ["BEANR", "ANTWERP", "ANTWERPEN", "ANR"]
+ZBEE_KW = ["BEZEE", "ZEEBRUGGE", "ZEEBRUG"]
+
+# ── Session state ─────────────────────────────────────────────────────────────
+for key, default in [
+    ("tracked", {}),
+    ("search_results", []),
+    ("vessel_data", {}),
+    ("last_fetch", None),
+    ("last_search", ""),
+]:
+    if key not in st.session_state:
+        st.session_state[key] = default
+
+
+# ── Functies ──────────────────────────────────────────────────────────────────
+def search_by_name(name: str) -> list:
+    """Zoek schepen op naam via VesselFinder."""
+    url = f"https://www.vesselfinder.com/vessels?name={requests.utils.quote(name.upper())}"
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    seen = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        # Formaat 1: /vessels/details/MMSI
+        m1 = re.search(r"/vessels/details/(\d{9})", href)
+        # Formaat 2: /vessels/NAME-IMO-XXXXXXX-MMSI-XXXXXXXXX
+        m2 = re.search(r"MMSI-(\d{9})", href, re.I)
+        mmsi_m = m1 or m2
+        if not mmsi_m:
+            continue
+        mmsi = mmsi_m.group(1)
+        if mmsi in seen:
+            continue
+        seen.add(mmsi)
+
+        imo_m = re.search(r"IMO-(\d{7})", href, re.I)
+        imo = imo_m.group(1) if imo_m else ""
+
+        vessel_name = a.get_text(strip=True).upper() or f"MMSI {mmsi}"
+        if len(vessel_name) < 2:
+            continue
+
+        results.append({
+            "name": vessel_name,
+            "mmsi": mmsi,
+            "imo":  imo,
+            "url":  f"https://www.vesselfinder.com/vessels/details/{mmsi}",
+        })
+
+    return results[:15]
+
 
 def scrape_vessel(mmsi: str) -> dict:
-    """Haal schepsinfo op van VesselFinder voor een MMSI nummer."""
-    mmsi = mmsi.strip()
+    """Scrape scheepsdetails van VesselFinder."""
     url = f"https://www.vesselfinder.com/vessels/details/{mmsi}"
-
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
-    except requests.RequestException as e:
-        return {"mmsi": mmsi, "error": str(e), "url": url}
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-
     result = {
-        "mmsi": mmsi,
-        "name": "—",
-        "type": "—",
-        "flag": "—",
-        "destination": "—",
-        "eta": "—",
-        "status": "—",
-        "speed": "—",
-        "last_port": "—",
+        "mmsi": mmsi, "name": "—", "type": "—", "flag": "—",
+        "destination": "—", "eta": "—", "status": "—",
+        "speed": "—", "last_port": "—",
         "scraped_at": datetime.utcnow().strftime("%H:%M UTC"),
-        "url": url,
-        "error": None,
+        "url": url, "error": None,
     }
+    try:
+        r = requests.get(url, headers=HEADERS, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        result["error"] = str(e)
+        return result
 
-    # Scheepsnaam — zit in <h1> of title
+    soup = BeautifulSoup(r.text, "html.parser")
+
     title = soup.find("title")
     if title:
-        t = title.text.strip()
-        # bv. "MSC ANTWERP - IMO 9839662 - MMSI 255806420 - VesselFinder"
-        name_match = re.match(r"^(.+?)\s*[-–]", t)
-        if name_match:
-            result["name"] = name_match.group(1).strip()
+        m = re.match(r"^(.+?)\s*[-–]", title.text.strip())
+        if m:
+            result["name"] = m.group(1).strip()
 
-    # Tabellen uitlezen — VesselFinder gebruikt <table> voor voyage details
-    tables = soup.find_all("table")
-    for table in tables:
-        rows = table.find_all("tr")
-        for row in rows:
+    for table in soup.find_all("table"):
+        for row in table.find_all("tr"):
             cells = row.find_all(["td", "th"])
             if len(cells) < 2:
                 continue
             key = cells[0].get_text(strip=True).lower()
             val = cells[1].get_text(strip=True)
+            if not val:
+                continue
+            if "destination" in key:                       result["destination"] = val
+            elif "eta" in key and "ais" not in key:        result["eta"] = val
+            elif "status" in key:                          result["status"] = val
+            elif "speed" in key:                           result["speed"] = val
+            elif "last port" in key or "previous" in key:  result["last_port"] = val
+            elif "flag" in key:                            result["flag"] = val
+            elif "type" in key and result["type"] == "—":  result["type"] = val
 
-            if "destination" in key:
-                result["destination"] = val or "—"
-            elif "eta" in key and "ais" not in key:
-                result["eta"] = val or "—"
-            elif "status" in key or "nav status" in key:
-                result["status"] = val or "—"
-            elif "speed" in key:
-                result["speed"] = val or "—"
-            elif "last port" in key or "previous port" in key:
-                result["last_port"] = val or "—"
-            elif "flag" in key:
-                result["flag"] = val or "—"
-            elif "type" in key and result["type"] == "—":
-                result["type"] = val or "—"
-
-    # Fallback: zoek in dl/dt/dd structuur
     for dt in soup.find_all("dt"):
         key = dt.get_text(strip=True).lower()
-        dd = dt.find_next_sibling("dd")
+        dd  = dt.find_next_sibling("dd")
         if not dd:
             continue
         val = dd.get_text(strip=True)
-        if "destination" in key and result["destination"] == "—":
-            result["destination"] = val
-        elif "eta" in key and result["eta"] == "—":
-            result["eta"] = val
-        elif "status" in key and result["status"] == "—":
-            result["status"] = val
-        elif "speed" in key and result["speed"] == "—":
-            result["speed"] = val
-        elif "last port" in key and result["last_port"] == "—":
-            result["last_port"] = val
-
-    # Zoek ook in tekstblokken naar ETA patronen als fallback
-    if result["eta"] == "—":
-        text = soup.get_text()
-        eta_match = re.search(r"ETA[:\s]+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}|\d{2}/\d{2}\s+\d{2}:\d{2})", text)
-        if eta_match:
-            result["eta"] = eta_match.group(1)
+        if "destination" in key and result["destination"] == "—": result["destination"] = val
+        elif "eta"       in key and result["eta"] == "—":          result["eta"] = val
+        elif "status"    in key and result["status"] == "—":       result["status"] = val
+        elif "speed"     in key and result["speed"] == "—":        result["speed"] = val
+        elif "last port" in key and result["last_port"] == "—":    result["last_port"] = val
 
     return result
 
 
-def status_badge(status: str) -> str:
-    s = status.lower()
-    if "anchor" in s:
-        css_class = "status-badge anchored"
-    else:
-        css_class = "status-badge"
-    return f'<span class="{css_class}">{status}</span>'
-
-
-# ── Sidebar: configuratie ────────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown("### ⚙️ Instellingen")
-
-    mmsi_input = st.text_area(
-        "MMSI nummers (één per lijn)",
-        placeholder="244650589\n244650123\n...",
-        height=200,
-        help="Voer één MMSI per lijn in. MMSI = 9-cijferig nummer."
+    st.markdown("### 🔍 Schip zoeken op naam")
+    naam_input = st.text_input(
+        "Scheepsnaam",
+        placeholder="bv.  MSC ANTWERP",
+        label_visibility="collapsed",
     )
+    zoek_btn = st.button("🔍 Zoeken op naam", type="primary", use_container_width=True)
 
+    st.markdown("---")
+    st.markdown("##### of direct via nummer")
+    nr_input = st.text_input("MMSI of IMO", placeholder="244650589", label_visibility="collapsed")
+    add_nr_btn = st.button("＋ Toevoegen", use_container_width=True)
+
+    st.markdown("---")
+
+    if st.session_state.tracked:
+        st.markdown('<div class="tracked-label">Gevolgde schepen</div>', unsafe_allow_html=True)
+        to_remove = []
+        for mmsi, info in list(st.session_state.tracked.items()):
+            c1, c2 = st.columns([5, 1])
+            with c1:
+                st.markdown(
+                    f"<small style='font-family:IBM Plex Mono,monospace;color:#9ca3af'>"
+                    f"{info.get('name','—')[:22]}<br>"
+                    f"<span style='color:#4b5563'>{mmsi}</span></small>",
+                    unsafe_allow_html=True
+                )
+            with c2:
+                if st.button("×", key=f"rm_{mmsi}"):
+                    to_remove.append(mmsi)
+        for m in to_remove:
+            del st.session_state.tracked[m]
+            st.session_state.vessel_data.pop(m, None)
+            st.rerun()
+
+        st.markdown("")
+        c_r, c_c = st.columns(2)
+        with c_r:
+            if st.button("🔄 Ververs", use_container_width=True):
+                st.session_state.vessel_data = {}
+                st.rerun()
+        with c_c:
+            if st.button("🗑 Wis alles", use_container_width=True):
+                st.session_state.tracked = {}
+                st.session_state.vessel_data = {}
+                st.rerun()
+
+    st.markdown("---")
+    show_table   = st.checkbox("Toon als tabel", value=True)
     auto_refresh = st.checkbox("Auto-refresh (60s)", value=False)
-    show_table = st.checkbox("Toon ook als tabel", value=True)
 
-    fetch_btn = st.button("🔄 Ophalen", type="primary", use_container_width=True)
 
-    st.markdown("---")
-    st.markdown("""
-**ℹ️ Toelichting**
+# ── Directe toevoeging via nummer ─────────────────────────────────────────────
+if add_nr_btn and nr_input.strip():
+    nr = nr_input.strip()
+    if nr.isdigit() and len(nr) in (7, 9):
+        st.session_state.tracked[nr] = {"name": f"#{nr}", "mmsi": nr}
+        st.rerun()
+    else:
+        st.warning("Voer een geldig MMSI (9 cijfers) of IMO (7 cijfers) in.")
 
-Data wordt opgehaald van [VesselFinder](https://www.vesselfinder.com) 
-via publieke scheepspagina's.
 
-- MMSI = 9-cijferig nummer  
-- Bv. *Antwerp Gateway*: `244650589`
-- Refresh elke 60s voor live tracking
+# ── Naam zoeken ───────────────────────────────────────────────────────────────
+if zoek_btn and naam_input.strip():
+    with st.spinner(f"Zoeken naar '{naam_input}'..."):
+        res = search_by_name(naam_input.strip())
+    st.session_state.search_results = res
+    st.session_state.last_search = naam_input.strip()
 
-*Data is afhankelijk van AIS transmissies.*
-    """)
+if st.session_state.search_results:
+    naam = st.session_state.last_search
+    res  = st.session_state.search_results
+    st.markdown(f"**{len(res)} schip(en) gevonden voor '{naam}'** — klik **＋ Voeg toe** om te volgen:")
+    st.markdown("")
 
-# ── Hoofdgedeelte ────────────────────────────────────────────────────────────
-if not mmsi_input.strip():
-    st.info("👈 Voer MMSI nummers in de sidebar in en klik op **Ophalen**.")
-    st.markdown("""
-#### Hoe vind je een MMSI?
-1. Ga naar [VesselFinder](https://www.vesselfinder.com) of [MarineTraffic](https://www.marinetraffic.com)
-2. Zoek op scheepsnaam
-3. Kopieer het 9-cijferig MMSI nummer
+    for i, v in enumerate(res):
+        c_card, c_btn = st.columns([5, 1])
+        with c_card:
+            st.markdown(f"""
+<div class="search-result">
+    <div class="sname">{v['name']}</div>
+    <div class="smeta">MMSI {v['mmsi']} &nbsp;·&nbsp; IMO {v.get('imo','—')}</div>
+</div>""", unsafe_allow_html=True)
+        with c_btn:
+            st.markdown("<div style='margin-top:0.4rem'></div>", unsafe_allow_html=True)
+            already = v["mmsi"] in st.session_state.tracked
+            if st.button(
+                "✓ Toegev." if already else "＋ Voeg toe",
+                key=f"add_{i}_{v['mmsi']}",
+                use_container_width=True,
+                disabled=already,
+            ):
+                st.session_state.tracked[v["mmsi"]] = v
+                st.rerun()
 
-**Voorbeeldnummers om te testen:**
-```
-244650589
-566554000
-```
-    """)
-    st.stop()
-
-mmsi_list = [m.strip() for m in mmsi_input.strip().split("\n") if m.strip()]
-
-if not mmsi_list:
-    st.warning("Geen geldige MMSI nummers gevonden.")
-    st.stop()
-
-# ── Data ophalen ─────────────────────────────────────────────────────────────
-should_fetch = fetch_btn or (auto_refresh and "vessels" not in st.session_state)
-
-if fetch_btn or "vessels" not in st.session_state or \
-   st.session_state.get("last_mmsi_list") != mmsi_list:
-
-    with st.spinner(f"Ophalen van {len(mmsi_list)} schip(en)..."):
-        vessels = []
-        progress = st.progress(0)
-        for i, mmsi in enumerate(mmsi_list):
-            vessels.append(scrape_vessel(mmsi))
-            progress.progress((i + 1) / len(mmsi_list))
-            if i < len(mmsi_list) - 1:
-                time.sleep(0.5)  # beleefd scrapen
-        progress.empty()
-
-    st.session_state["vessels"] = vessels
-    st.session_state["last_fetch"] = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
-    st.session_state["last_mmsi_list"] = mmsi_list
-
-vessels = st.session_state.get("vessels", [])
-last_fetch = st.session_state.get("last_fetch", "—")
-
-if vessels:
-    st.markdown(f'<div class="refresh-info">Laatste update: {last_fetch} · {len(vessels)} schip(en) · Data: VesselFinder AIS</div>', unsafe_allow_html=True)
-
-# ── Kaartweergave ─────────────────────────────────────────────────────────────
-ok_vessels = [v for v in vessels if not v.get("error")]
-err_vessels = [v for v in vessels if v.get("error")]
-
-if ok_vessels:
-    cols = st.columns(min(3, len(ok_vessels)))
-    # Kleine KPI badges bovenaan
-    etas = [v["eta"] for v in ok_vessels if v["eta"] != "—"]
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Schepen getrackt", len(ok_vessels))
-    col2.metric("Met ETA", len(etas))
-    col3.metric("Zonder data", len(err_vessels))
-
+    if st.button("✖ Sluit zoekresultaten"):
+        st.session_state.search_results = []
+        st.rerun()
     st.markdown("---")
 
-for v in vessels:
+
+# ── Geen schepen gevolgd ──────────────────────────────────────────────────────
+if not st.session_state.tracked:
+    st.info("👈 Zoek een scheepsnaam links en voeg schepen toe aan je volglijst.")
+    st.stop()
+
+
+# ── Data ophalen ──────────────────────────────────────────────────────────────
+missing = [m for m in st.session_state.tracked if m not in st.session_state.vessel_data]
+if missing:
+    with st.spinner(f"AIS data ophalen voor {len(missing)} schip(en)..."):
+        prog = st.progress(0)
+        for i, mmsi in enumerate(missing):
+            data = scrape_vessel(mmsi)
+            if data.get("name") and data["name"] != "—":
+                st.session_state.tracked[mmsi]["name"] = data["name"]
+            st.session_state.vessel_data[mmsi] = data
+            prog.progress((i + 1) / len(missing))
+            if i < len(missing) - 1:
+                time.sleep(0.5)
+        prog.empty()
+    st.session_state.last_fetch = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+vdata      = st.session_state.vessel_data
+last_fetch = st.session_state.last_fetch or "—"
+
+# ── KPI's ─────────────────────────────────────────────────────────────────────
+total   = len(st.session_state.tracked)
+met_eta = sum(1 for m in st.session_state.tracked if vdata.get(m, {}).get("eta", "—") != "—")
+naar_be = sum(1 for m in st.session_state.tracked
+              if any(k in (vdata.get(m, {}).get("destination") or "").upper()
+                     for k in ANTP_KW + ZBEE_KW))
+
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Gevolgd", total)
+c2.metric("Met ETA", met_eta)
+c3.metric("→ BEANR / BEZEE", naar_be)
+c4.metric("Update", last_fetch.split(" ")[1] if " " in last_fetch else "—")
+
+st.markdown(f'<div class="refresh-info">Laatste update: {last_fetch} · VesselFinder AIS</div>',
+            unsafe_allow_html=True)
+st.markdown("---")
+
+
+# ── Scheepskaarten ────────────────────────────────────────────────────────────
+for mmsi, info in st.session_state.tracked.items():
+    v = vdata.get(mmsi, {})
     if v.get("error"):
         st.markdown(f"""
 <div class="vessel-card error">
-    <div class="vessel-name">MMSI: {v['mmsi']}</div>
-    <div class="error-msg">⚠️ Fout bij ophalen: {v['error']}</div>
-    <div class="lastport"><a href="{v['url']}" target="_blank" style="color:#4b5563">→ Bekijk op VesselFinder</a></div>
-</div>
-""", unsafe_allow_html=True)
+    <div class="vessel-name">{info.get('name','—')} <span style="color:#6b7280;font-size:0.78rem">· {mmsi}</span></div>
+    <div style="color:#ef4444;font-size:0.8rem;font-family:'IBM Plex Mono',monospace">⚠️ {v['error']}</div>
+    <a class="vf-link" href="https://www.vesselfinder.com/vessels/details/{mmsi}" target="_blank">↗ VesselFinder</a>
+</div>""", unsafe_allow_html=True)
         continue
 
-    eta_html = f'<span class="eta-badge">ETA {v["eta"]}</span>' if v["eta"] != "—" else ""
-    dest_html = f'<span class="dest-badge">→ {v["destination"]}</span>' if v["destination"] != "—" else ""
-    status_html = status_badge(v["status"]) if v["status"] != "—" else ""
-    speed_txt = f' · {v["speed"]} kn' if v["speed"] != "—" else ""
-    lastport_txt = f'Vorige haven: {v["last_port"]}' if v["last_port"] != "—" else ""
-    type_flag = f'{v["flag"]} · {v["type"]}' if v["type"] != "—" else v["flag"]
+    dest    = v.get("destination") or "—"
+    eta     = v.get("eta") or "—"
+    dest_up = dest.upper()
+    is_be   = any(k in dest_up for k in ANTP_KW + ZBEE_KW)
+
+    # Port label
+    if any(k in dest_up for k in ANTP_KW):
+        port_badge = '<span class="badge badge-be">→ Antwerpen</span>'
+    elif any(k in dest_up for k in ZBEE_KW):
+        port_badge = '<span class="badge badge-be">→ Zeebrugge</span>'
+    elif dest != "—":
+        port_badge = f'<span class="badge badge-dest">→ {dest}</span>'
+    else:
+        port_badge = ""
+
+    eta_html  = f'<span class="badge badge-eta">ETA {eta}</span>' if eta != "—" else ""
+    stat_html = f'<span class="badge badge-stat">{v.get("status","")}</span>' if v.get("status","—") != "—" else ""
+    speed_txt = f' · {v["speed"]} kn' if v.get("speed","—") != "—" else ""
+    lp_txt    = f'Vorige haven: {v["last_port"]}' if v.get("last_port","—") != "—" else ""
+    card_css  = "towards" if is_be else ("other" if dest != "—" else "")
 
     st.markdown(f"""
-<div class="vessel-card">
-    <a class="vf-link" href="{v['url']}" target="_blank">↗ VesselFinder</a>
-    <div class="vessel-name">{v['name']}</div>
-    <div class="vessel-meta">MMSI {v['mmsi']} · {type_flag}{speed_txt} · {v['scraped_at']}</div>
-    <div>
-        {eta_html}
-        {dest_html}
-        {status_html}
-    </div>
-    <div class="lastport">{lastport_txt}</div>
-</div>
-""", unsafe_allow_html=True)
+<div class="vessel-card {card_css}">
+    <a class="vf-link" href="{v.get('url','#')}" target="_blank">↗ VesselFinder</a>
+    <div class="vessel-name">{v.get('name') or info.get('name','—')}</div>
+    <div class="vessel-meta">MMSI {mmsi} · {v.get('type','—')} · {v.get('flag','—')}{speed_txt} · {v.get('scraped_at','—')}</div>
+    <div>{eta_html}{port_badge}{stat_html}</div>
+    <div class="detail-line">{lp_txt}</div>
+</div>""", unsafe_allow_html=True)
 
 
-# ── Tabelweergave ─────────────────────────────────────────────────────────────
-if show_table and vessels:
+# ── Tabel + export ────────────────────────────────────────────────────────────
+if show_table:
     st.markdown("---")
     st.subheader("📋 Overzichtstabel")
-
-    df_data = []
-    for v in vessels:
-        df_data.append({
-            "MMSI": v["mmsi"],
-            "Naam": v["name"] if not v.get("error") else "ERROR",
-            "Bestemming": v.get("destination", "—"),
-            "ETA": v.get("eta", "—"),
-            "Status": v.get("status", "—"),
-            "Snelheid": v.get("speed", "—"),
-            "Vorige haven": v.get("last_port", "—"),
-            "Update": v.get("scraped_at", "—"),
+    rows = []
+    for mmsi, info in st.session_state.tracked.items():
+        v    = vdata.get(mmsi, {})
+        dest = v.get("destination") or "—"
+        rows.append({
+            "Naam":         v.get("name") or info.get("name","—"),
+            "MMSI":         mmsi,
+            "Bestemming":   dest,
+            "→ BE":         "✅" if any(k in dest.upper() for k in ANTP_KW + ZBEE_KW) else "—",
+            "ETA":          v.get("eta","—"),
+            "Status":       v.get("status","—"),
+            "Snelheid":     v.get("speed","—"),
+            "Vorige haven": v.get("last_port","—"),
+            "Update":       v.get("scraped_at","—"),
         })
-
-    df = pd.DataFrame(df_data)
+    df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
-
-    # CSV download
-    csv = df.to_csv(index=False).encode("utf-8")
     st.download_button(
         "⬇️ Download CSV",
-        csv,
-        f"vessel_tracker_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
+        df.to_csv(index=False).encode("utf-8"),
+        f"dkm_tracker_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.csv",
         "text/csv",
-        use_container_width=False,
     )
 
-# ── Auto-refresh ──────────────────────────────────────────────────────────────
 if auto_refresh:
     time.sleep(60)
+    st.session_state.vessel_data = {}
     st.rerun()

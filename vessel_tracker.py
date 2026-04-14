@@ -1,13 +1,17 @@
 """
 DKM Vessel Tracker
-Zoek schepen op naam via Data Docked API — volg ETA naar Antwerpen/Zeebrugge
+Zoek schepen op naam:
+  1. Data Docked naam-zoekfunctie (1 credit)
+  2. Fallback: VesselFinder zoekpagina (gratis scrape) → MMSI/IMO → Data Docked details
 """
 
 import streamlit as st
 import requests
+from bs4 import BeautifulSoup
 import pandas as pd
 from datetime import datetime
 import time
+import re
 
 st.set_page_config(page_title="DKM Vessel Tracker", page_icon="🚢", layout="wide")
 
@@ -27,8 +31,10 @@ st.markdown("""
         background:#1a1d27; border:1px solid #2a2d3a; border-left:3px solid #3b82f6;
         border-radius:6px; padding:0.7rem 1rem; margin-bottom:0.4rem;
     }
+    .search-result.fallback { border-left-color: #f59e0b; }
     .search-result .sname { font-family:'IBM Plex Mono',monospace; font-weight:600; color:#e8eaf0; font-size:0.9rem; }
     .search-result .smeta { font-size:0.75rem; color:#6b7280; margin-top:0.15rem; font-family:'IBM Plex Mono',monospace; }
+    .search-result .ssource { font-size:0.68rem; color:#4b5563; margin-top:0.2rem; }
 
     .vessel-card {
         background:#1a1d27; border:1px solid #2a2d3a; border-left:4px solid #D94F2B;
@@ -53,26 +59,36 @@ st.markdown("""
     .refresh-info { font-size:0.74rem; color:#4b5563; font-family:'IBM Plex Mono',monospace; margin-bottom:0.8rem; }
     .tracked-label { font-size:0.7rem; color:#6b7280; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:0.4rem; }
     .credit-note { font-size:0.72rem; color:#4b5563; font-family:'IBM Plex Mono',monospace; }
+    .source-tag { font-size:0.68rem; padding:0.15rem 0.5rem; border-radius:3px; margin-left:0.4rem; }
+    .source-dd  { background:rgba(59,130,246,0.1); color:#60a5fa; border:1px solid rgba(59,130,246,0.2); }
+    .source-vf  { background:rgba(245,158,11,0.1); color:#fbbf24; border:1px solid rgba(245,158,11,0.2); }
 </style>
 """, unsafe_allow_html=True)
 
 st.markdown("""
 <div class="header-bar">
     <h1>🚢 DKM Vessel Tracker</h1>
-    <span>Real-time ETA opvolging via Data Docked AIS — Antwerpen &amp; Zeebrugge</span>
+    <span>Real-time ETA opvolging naar Antwerpen &amp; Zeebrugge</span>
 </div>
 """, unsafe_allow_html=True)
 
 # ── Constanten ────────────────────────────────────────────────────────────────
-BASE     = "https://datadocked.com/api/vessels_operations"
+DD_BASE  = "https://datadocked.com/api/vessels_operations"
 ANTP_KW  = ["BEANR", "ANTWERP", "ANTWERPEN", "ANR"]
 ZBEE_KW  = ["BEZEE", "ZEEBRUGGE", "ZEEBRUG"]
 
+VF_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) "
+                  "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+}
+
 # ── Session state ─────────────────────────────────────────────────────────────
 for key, default in [
-    ("tracked", {}),          # {mmsi: {name, mmsi, imo}}
+    ("tracked", {}),
     ("search_results", []),
-    ("vessel_data", {}),      # {mmsi: api response dict}
+    ("vessel_data", {}),
     ("last_fetch", None),
     ("last_search", ""),
 ]:
@@ -80,40 +96,22 @@ for key, default in [
         st.session_state[key] = default
 
 
-# ── API hulpfunctie ───────────────────────────────────────────────────────────
-def api_get(path: str, params: dict, key: str):
+# ── Data Docked hulpfuncties ──────────────────────────────────────────────────
+def dd_get(path: str, params: dict, api_key: str):
     try:
-        r = requests.get(
-            f"{BASE}/{path}", params=params,
-            headers={"accept": "application/json", "x-api-key": key},
+        return requests.get(
+            f"{DD_BASE}/{path}", params=params,
+            headers={"accept": "application/json", "x-api-key": api_key},
             timeout=15,
         )
-        return r
-    except Exception as e:
+    except Exception:
         return None
 
 
-def fetch_vessel(mmsi_or_imo: str, api_key: str) -> dict:
-    """Haal volledige scheepsdata op (5 credits)."""
-    r = api_get("get-vessel-info", {"imo_or_mmsi": mmsi_or_imo}, api_key)
-    if r is None:
-        return {"error": "Geen verbinding"}
-    if r.status_code == 404:
-        return {"error": "Schip niet gevonden"}
-    if r.status_code == 401:
-        return {"error": "API key ongeldig"}
-    if r.status_code == 403:
-        return {"error": "Geen toegang (credits op of plan limiet)"}
-    if r.status_code != 200:
-        return {"error": f"HTTP {r.status_code}"}
-    data = r.json()
-    return data.get("detail", data)
-
-
-def search_by_name(name: str, api_key: str) -> list:
-    """Zoek schepen op naam (1 credit)."""
-    r = api_get("vessels-by-vessel-name", {"vessel_name": name.upper()}, api_key)
-    if r is None or r.status_code != 200:
+def dd_search_name(name: str, api_key: str) -> list:
+    """Zoek via Data Docked naam endpoint (1 credit)."""
+    r = dd_get("vessels-by-vessel-name", {"vessel_name": name.upper()}, api_key)
+    if not r or r.status_code != 200:
         return []
     data = r.json()
     if isinstance(data, list):
@@ -127,8 +125,102 @@ def search_by_name(name: str, api_key: str) -> list:
     return []
 
 
-def dest_info(dest: str, unlocode: str) -> tuple[str, str]:
-    """Geeft (port_label, card_class) terug."""
+def dd_fetch_vessel(ident: str, api_key: str) -> dict:
+    """Haal volledige scheepsdata op via Data Docked (5 credits)."""
+    r = dd_get("get-vessel-info", {"imo_or_mmsi": ident}, api_key)
+    if r is None:
+        return {"error": "Geen verbinding met Data Docked"}
+    if r.status_code == 404:
+        return {"error": "Schip niet gevonden"}
+    if r.status_code == 401:
+        return {"error": "API key ongeldig"}
+    if r.status_code == 403:
+        return {"error": "Geen toegang (credits op of plan limiet)"}
+    if r.status_code != 200:
+        return {"error": f"HTTP {r.status_code}"}
+    data = r.json()
+    return data.get("detail", data)
+
+
+# ── VesselFinder fallback zoekfunctie ─────────────────────────────────────────
+def vf_search_name(name: str) -> list:
+    """
+    Zoek schepen op naam via VesselFinder zoekpagina.
+    Haalt MMSI/IMO op uit de URL-structuur van de resultaten.
+    Gratis, geen credits.
+    """
+    url = f"https://www.vesselfinder.com/vessels?name={requests.utils.quote(name.upper())}"
+    try:
+        r = requests.get(url, headers=VF_HEADERS, timeout=12)
+        r.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    results = []
+    seen = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+
+        # Patroon 1: /vessels/details/371218000
+        m1 = re.search(r"/vessels/details/(\d{7,9})", href)
+        # Patroon 2: /vessels/MSC-EVA-IMO-9401130-MMSI-371218000
+        m2 = re.search(r"MMSI[_-](\d{9})", href, re.I)
+        # Patroon 3: ?mmsi=371218000
+        m3 = re.search(r"[?&]mmsi=(\d{9})", href, re.I)
+
+        mmsi_match = m2 or m3 or (m1 if m1 and len(m1.group(1)) == 9 else None)
+        imo_match  = re.search(r"IMO[_-](\d{7})", href, re.I)
+
+        if not mmsi_match and not imo_match:
+            continue
+
+        mmsi = mmsi_match.group(1) if mmsi_match else ""
+        imo  = imo_match.group(1)  if imo_match  else ""
+        uid  = mmsi or imo
+
+        if not uid or uid in seen:
+            continue
+        seen.add(uid)
+
+        vessel_name = a.get_text(strip=True).upper()
+        if len(vessel_name) < 2 or vessel_name.lower() in ("details", "more", "info"):
+            continue
+
+        results.append({
+            "name":   vessel_name,
+            "mmsi":   mmsi,
+            "imo":    imo,
+            "source": "VesselFinder",
+            "url":    f"https://www.vesselfinder.com/vessels/details/{mmsi or imo}",
+        })
+
+    return results[:15]
+
+
+# ── Gecombineerde zoekfunctie ─────────────────────────────────────────────────
+def smart_search(name: str, api_key: str) -> tuple[list, str]:
+    """
+    Zoek eerst via Data Docked. Als leeg → fallback naar VesselFinder.
+    Geeft (resultaten, bron) terug.
+    """
+    # Stap 1: Data Docked
+    dd_results = dd_search_name(name, api_key)
+    if dd_results:
+        for r in dd_results:
+            r["source"] = "Data Docked"
+        return dd_results, "datadocked"
+
+    # Stap 2: VesselFinder fallback
+    vf_results = vf_search_name(name)
+    if vf_results:
+        return vf_results, "vesselfinder"
+
+    return [], "none"
+
+
+def dest_info(dest: str, unlocode: str) -> tuple:
     combined = (dest + " " + unlocode).upper()
     if any(k in combined for k in ANTP_KW):
         return "Antwerpen", "towards"
@@ -142,7 +234,6 @@ def dest_info(dest: str, unlocode: str) -> tuple[str, str]:
 # ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🔑 API Key")
-    # Probeer eerst uit Streamlit secrets, anders handmatig
     try:
         default_key = st.secrets["datadocked"]["api_key"]
     except Exception:
@@ -153,22 +244,22 @@ with st.sidebar:
         value=default_key,
         type="password",
         placeholder="Jouw key hier",
-        help="Sla op in .streamlit/secrets.toml voor automatisch laden"
     )
 
     st.markdown("---")
     st.markdown("### 🔍 Schip zoeken op naam")
     naam_input = st.text_input(
         "Scheepsnaam",
-        placeholder="bv.  MSC ANTWERP",
+        placeholder="bv.  MSC EVA  of  ONTARIO",
         label_visibility="collapsed",
     )
     zoek_btn = st.button("🔍 Zoeken", type="primary", use_container_width=True)
-    st.markdown('<div class="credit-note">↳ kost 1 credit per zoekopdracht</div>', unsafe_allow_html=True)
+    st.markdown('<div class="credit-note">↳ 1 credit · fallback via VesselFinder bij geen resultaat</div>',
+                unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("##### of direct via nummer")
-    nr_input   = st.text_input("MMSI of IMO", placeholder="244650589", label_visibility="collapsed")
+    nr_input   = st.text_input("MMSI of IMO", placeholder="371218000", label_visibility="collapsed")
     add_nr_btn = st.button("＋ Toevoegen", use_container_width=True)
 
     st.markdown("---")
@@ -177,18 +268,18 @@ with st.sidebar:
     if st.session_state.tracked:
         st.markdown('<div class="tracked-label">Gevolgde schepen</div>', unsafe_allow_html=True)
         to_remove = []
-        for mmsi, info in list(st.session_state.tracked.items()):
+        for ident, info in list(st.session_state.tracked.items()):
             c1, c2 = st.columns([5, 1])
             with c1:
                 st.markdown(
                     f"<small style='font-family:IBM Plex Mono,monospace;color:#9ca3af'>"
                     f"{info.get('name','—')[:22]}<br>"
-                    f"<span style='color:#4b5563'>{mmsi}</span></small>",
-                    unsafe_allow_html=True
+                    f"<span style='color:#4b5563'>{ident}</span></small>",
+                    unsafe_allow_html=True,
                 )
             with c2:
-                if st.button("×", key=f"rm_{mmsi}"):
-                    to_remove.append(mmsi)
+                if st.button("×", key=f"rm_{ident}"):
+                    to_remove.append(ident)
         for m in to_remove:
             del st.session_state.tracked[m]
             st.session_state.vessel_data.pop(m, None)
@@ -222,26 +313,53 @@ if add_nr_btn and nr_input.strip():
     nr = nr_input.strip()
     if nr.isdigit() and len(nr) in (7, 9):
         st.session_state.tracked[nr] = {"name": f"#{nr}", "mmsi": nr}
+        st.session_state.search_results = []
         st.rerun()
     else:
         st.sidebar.warning("MMSI = 9 cijfers, IMO = 7 cijfers.")
 
 
-# ── Naam zoeken ───────────────────────────────────────────────────────────────
+# ── Zoeken op naam ────────────────────────────────────────────────────────────
 if zoek_btn and naam_input.strip():
-    with st.spinner(f"Zoeken naar '{naam_input}' (1 credit)..."):
-        results = search_by_name(naam_input.strip(), api_key)
+    with st.spinner(f"Zoeken naar '{naam_input}'..."):
+        results, source = smart_search(naam_input.strip(), api_key)
     st.session_state.search_results = results
     st.session_state.last_search    = naam_input.strip()
+    st.session_state["search_source"] = source
+
     if not results:
-        st.warning(f"Geen resultaten voor '{naam_input}'. Probeer een kortere naam.")
+        st.warning(
+            f"**'{naam_input}' niet gevonden** via Data Docked én VesselFinder. "
+            f"Probeer een kortere naam (bv. `MSC EVA` → `EVA`) of zoek het MMSI/IMO op via "
+            f"[VesselFinder](https://www.vesselfinder.com/vessels?name={requests.utils.quote(naam_input)}) "
+            f"en voeg het direct toe via het nummerveld."
+        )
 
 
 # ── Zoekresultaten weergeven ──────────────────────────────────────────────────
 if st.session_state.search_results:
-    naam = st.session_state.last_search
-    res  = st.session_state.search_results
-    st.markdown(f"**{len(res)} schip(en) gevonden voor '{naam}'** — klik **＋ Voeg toe** om te volgen:")
+    naam   = st.session_state.last_search
+    res    = st.session_state.search_results
+    source = st.session_state.get("search_source", "")
+
+    source_label = (
+        '<span class="source-tag source-dd">Data Docked</span>'
+        if source == "datadocked"
+        else '<span class="source-tag source-vf">VesselFinder fallback</span>'
+    )
+
+    if source == "vesselfinder":
+        st.info(
+            f"⚠️ **Data Docked vond niets voor '{naam}'** — "
+            f"onderstaande resultaten komen van VesselFinder. "
+            f"Details ophalen kost nog steeds 5 credits per schip."
+        )
+
+    st.markdown(
+        f"**{len(res)} schip(en) gevonden voor '{naam}'** {source_label} "
+        f"— klik **＋ Voeg toe** om te volgen:",
+        unsafe_allow_html=True,
+    )
     st.markdown("")
 
     for i, v in enumerate(res[:20]):
@@ -250,13 +368,19 @@ if st.session_state.search_results:
         imo   = str(v.get("imo", ""))
         vtype = v.get("shipType") or v.get("type", "")
         flag  = v.get("country") or v.get("flag", "")
+        vsrc  = v.get("source", "")
         ident = mmsi or imo
 
         c_card, c_btn = st.columns([5, 1])
         with c_card:
+            src_tag = (
+                '<span class="source-tag source-vf">VF</span>'
+                if vsrc == "VesselFinder"
+                else '<span class="source-tag source-dd">DD</span>'
+            )
             st.markdown(f"""
-<div class="search-result">
-    <div class="sname">{name}</div>
+<div class="search-result {'fallback' if vsrc == 'VesselFinder' else ''}">
+    <div class="sname">{name} {src_tag}</div>
     <div class="smeta">MMSI {mmsi or '—'} &nbsp;·&nbsp; IMO {imo or '—'} &nbsp;·&nbsp; {vtype} &nbsp;·&nbsp; {flag}</div>
 </div>""", unsafe_allow_html=True)
         with c_btn:
@@ -268,7 +392,9 @@ if st.session_state.search_results:
                 use_container_width=True,
                 disabled=already,
             ):
-                st.session_state.tracked[ident] = {"name": name, "mmsi": mmsi, "imo": imo}
+                st.session_state.tracked[ident] = {
+                    "name": name, "mmsi": mmsi, "imo": imo
+                }
                 st.rerun()
 
     if st.button("✖ Sluit zoekresultaten"):
@@ -282,8 +408,8 @@ if not st.session_state.tracked:
     st.info("👈 Zoek een scheepsnaam links en voeg schepen toe aan je volglijst.")
     st.markdown("""
 **Hoe werkt het?**
-1. Typ een scheepsnaam links (bv. `MSC ANTWERP` of `ONTARIO`)
-2. Klik **🔍 Zoeken** — je krijgt een lijst van overeenkomende schepen
+1. Typ een scheepsnaam links (bv. `MSC EVA` of `ONTARIO`)
+2. Klik **🔍 Zoeken** — de app zoekt eerst via Data Docked, daarna automatisch via VesselFinder als fallback
 3. Klik **＋ Voeg toe** op het juiste schip
 4. Data wordt automatisch opgehaald — je ziet ETA, bestemming, status
 
@@ -299,8 +425,7 @@ if missing:
     with st.spinner(f"Data ophalen voor {len(missing)} schip(en) ({len(missing) * 5} credits)..."):
         prog = st.progress(0)
         for i, ident in enumerate(missing):
-            data = fetch_vessel(ident, api_key)
-            # Update naam als we die nu hebben
+            data = dd_fetch_vessel(ident, api_key)
             if data.get("name") and not data.get("error"):
                 st.session_state.tracked[ident]["name"] = data["name"]
             st.session_state.vessel_data[ident] = data
@@ -312,6 +437,7 @@ if missing:
 
 vdata      = st.session_state.vessel_data
 last_fetch = st.session_state.last_fetch or "—"
+
 
 # ── KPI's ─────────────────────────────────────────────────────────────────────
 total   = len(st.session_state.tracked)
@@ -359,8 +485,10 @@ for ident, info in st.session_state.tracked.items():
 
     port_label, card_css = dest_info(dest, unlocode)
 
-    # Badges
-    eta_html = f'<span class="badge badge-eta">ETA {eta}</span>' if eta != "—" else ""
+    eta_html  = f'<span class="badge badge-eta">ETA {eta}</span>' if eta != "—" else ""
+    stat_html = f'<span class="badge badge-stat">{status}</span>' if status != "—" else ""
+    speed_txt = f' · {speed} kn' if speed != "—" else ""
+    lp_txt    = f'Vorige haven: {lastport}' if lastport != "—" else ""
 
     if card_css == "towards":
         dest_html = f'<span class="badge badge-be">→ {port_label}</span>'
@@ -368,10 +496,6 @@ for ident, info in st.session_state.tracked.items():
         dest_html = f'<span class="badge badge-dest">→ {dest}</span>'
     else:
         dest_html = ""
-
-    stat_html  = f'<span class="badge badge-stat">{status}</span>' if status != "—" else ""
-    speed_txt  = f' · {speed} kn' if speed != "—" else ""
-    lp_txt     = f'Vorige haven: {lastport}' if lastport != "—" else ""
 
     vf_url = f"https://www.vesselfinder.com/vessels/details/{mmsi}" if mmsi else "#"
 
@@ -396,16 +520,16 @@ if show_table:
         unlo = v.get("unlocodeDestination") or ""
         port_label, _ = dest_info(dest, unlo)
         rows.append({
-            "Naam":         v.get("name") or info.get("name","—"),
-            "MMSI":         v.get("mmsi") or ident,
-            "IMO":          v.get("imo","—"),
-            "Bestemming":   dest,
-            "UNLOCODE":     unlo,
-            "→ BE":         f"✅ {port_label}" if port_label in ("Antwerpen","Zeebrugge") else "—",
-            "ETA (UTC)":    v.get("etaUtc","—"),
-            "Status":       v.get("navigationalStatus","—"),
-            "Snelheid (kn)":v.get("speed","—"),
-            "Vorige haven": v.get("lastPort","—"),
+            "Naam":          v.get("name") or info.get("name","—"),
+            "MMSI":          v.get("mmsi") or ident,
+            "IMO":           v.get("imo","—"),
+            "Bestemming":    dest,
+            "UNLOCODE":      unlo,
+            "→ BE":          f"✅ {port_label}" if port_label in ("Antwerpen","Zeebrugge") else "—",
+            "ETA (UTC)":     v.get("etaUtc","—"),
+            "Status":        v.get("navigationalStatus","—"),
+            "Snelheid (kn)": v.get("speed","—"),
+            "Vorige haven":  v.get("lastPort","—"),
         })
     df = pd.DataFrame(rows)
     st.dataframe(df, use_container_width=True, hide_index=True)
